@@ -5,16 +5,12 @@ Command line utility for extracting LTC timecodes from an input WAV file.
 
 ## Basic usage
 
-user@computer:~$ ltcdump input.wav
-18:06:53:05 --> 18:19:04:04
-user@computer:~$ 
+user@computer:$ ltcdump input.wav
+ *** Timecode range: 18:06:53:05 --> 18:19:04:04
 
 ## JSON output 
 
-user@computer:~$ ltcdump input.wav -j
-18:06:53:05 --> 18:19:04:04
-user@computer:~$ 
-
+user@computer:$ ltcdump input.wav -j
 
 {
         "InfoMessages": [
