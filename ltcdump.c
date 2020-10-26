@@ -96,13 +96,13 @@ static void log_info(int level, const char* fmt, ...)
   va_list args;
   va_start(args, fmt);
 
-  if (json_output)
+  if (verbosity >= level)
   {
-    vqueue_msg(&info_queue, level, 0, fmt, args);
-  }
-  else
-  {
-    if (verbosity >= level)
+    if (json_output)
+    {
+      vqueue_msg(&info_queue, level, 0, fmt, args);
+    }
+    else
     {
       printf(" *** ");
       vprintf(fmt, args);
@@ -747,7 +747,7 @@ int main(int argc, char **argv)
         return_fail;
       }
 
-      log_info(1, "Detected FPS=%d\n", fps);
+      log_info(1, "Detected FPS=%d", fps);
     }
 
 
@@ -831,8 +831,9 @@ int main(int argc, char **argv)
       {
         log_info(1, "Warning: Gap between LTC frames");
       
-        printf("%s --> %s\n", timecode_to_str(&starting_timecode),
-                              timecode_to_str(&last_timecode));
+        log_info(0, "Timecode range %s --> %s", 
+                    timecode_to_str(&starting_timecode),
+                    timecode_to_str(&last_timecode));
 
         // Add to linked list of ranges for JSON.
         timecode_range_append(&output_data->timecode_range_ptr, 
@@ -851,8 +852,9 @@ int main(int argc, char **argv)
 
   if (seen_starting_timecode)
   {
-    printf("%s --> %s\n", timecode_to_str(&starting_timecode),
-                          timecode_to_str(&last_timecode));
+    log_info(0, "Timecode range %s --> %s", 
+                timecode_to_str(&starting_timecode),
+                timecode_to_str(&last_timecode));
 
     // Add to linked list of ranges for JSON.
     timecode_range_append(&output_data->timecode_range_ptr, 
