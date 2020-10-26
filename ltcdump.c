@@ -5,11 +5,13 @@
 #include <getopt.h>
 #include "wav.h"
 
-int verbosity = 1;
-
 typedef char bool;
 static const char false = 0;
 static const char true = 1;
+
+int verbosity = 0;
+bool json_output = false;
+
 
 // Unsigned error return value
 static const size_t ST_ERROR = 0xffffffff;
@@ -18,6 +20,99 @@ static const char* SYNC_WORD_STR = "0011111111111101";
 static unsigned int SYNC_WORD = 0xbffc;
 
 #define countof(x)  (sizeof(x) / sizeof(x[0]))
+
+/*
+ * Logging
+ */
+typedef struct 
+{
+  const char* string;
+  int level;
+  int status_code;
+} Msg;
+
+typedef struct 
+{
+  Msg msgs[4096];
+  size_t n;
+} Queue;
+
+static Queue info_queue = {0};
+static Queue error_queue = {0};
+
+static void vqueue_msg(Queue* queue, int level, int status_code, const char*fmt, va_list args)
+{
+  va_list args_copy;
+  va_copy(args_copy, args);
+  int size = vsnprintf(NULL, (size_t)0, fmt, args_copy);
+  va_end(args_copy);
+
+  char* str = malloc(size + 1);
+  vsprintf(str, fmt, args);
+
+  if (queue->n < countof(queue->msgs))
+  {
+    Msg* msg = &queue->msgs[queue->n++];
+
+    msg->string = str;
+    msg->level = level;
+    msg->status_code = status_code;
+  } 
+}
+
+/* SUPRESS UNUSED FUNC WARNING
+static void queue_msg(Queue* queue, int level, int status_code, const char*fmt, ...)
+{
+  va_list args;
+  va_start(args, fmt);
+
+  vqueue_msg(queue, level, status_code, fmt, args);
+
+  va_end(args);
+}
+*/
+
+static void log_error(int status_code, const char* fmt, ...)
+{
+  va_list args;
+  va_start(args, fmt);
+
+  if (json_output)
+  {
+    vqueue_msg(&error_queue, 0, status_code, fmt, args);
+  }
+  else
+  {
+    fprintf(stderr, "%d: ", status_code);
+    vfprintf(stderr, fmt, args);
+    fprintf(stderr, "\n");
+  }
+
+  va_end(args);
+}
+
+static void log_info(int level, const char* fmt, ...)
+{
+  va_list args;
+  va_start(args, fmt);
+
+  if (json_output)
+  {
+    vqueue_msg(&info_queue, level, 0, fmt, args);
+  }
+  else
+  {
+    if (verbosity >= level)
+    {
+      printf(" *** ");
+      vprintf(fmt, args);
+      printf("\n");
+    }
+  }
+
+  va_end(args);
+}
+
 
 /* 
  * The 80 bits of the LTC frame as a C struct.
@@ -75,6 +170,26 @@ struct SMPTETimecode {
 };
 typedef struct SMPTETimecode SMPTETimecode;
 
+static char* timecode_to_str(SMPTETimecode* stime)
+{
+  // Ring buffer of 5 returns values, before we start to overwrite.
+  static char buffers[5][13];
+  static size_t i = 0;
+
+  char* buffer = buffers[i];
+
+  snprintf(buffer, sizeof(buffers[i]),
+           "%02d:%02d:%02d:%02d",
+           (int)stime->hours, 
+           (int)stime->mins, 
+           (int)stime->secs, 
+           (int)stime->frame);
+
+  i = (i+1) % countof(buffers);
+
+  return buffer;
+}
+
 static void ltc_frame_to_time(SMPTETimecode *stime, LTCFrame *frame/*, int flags*/) {
         if (!stime) return;
 
@@ -97,13 +212,176 @@ static void ltc_frame_to_time(SMPTETimecode *stime, LTCFrame *frame/*, int flags
         stime->frame = frame->frame_units + frame->frame_tens*10;
 }
 
+/*
+ * Encapsulate a node in a linked list of ranges of timecodes.
+ */
+typedef struct _SMPTETimecodeRange
+{
+  SMPTETimecode start, end;
+  struct _SMPTETimecodeRange* next_ptr;
+} SMPTETimecodeRange;
+
+SMPTETimecodeRange* create_timecode_range(SMPTETimecode* start, SMPTETimecode* end)
+{
+  SMPTETimecodeRange* obj = malloc(sizeof(SMPTETimecodeRange));
+  memcpy(&obj->start, start, sizeof(SMPTETimecode));
+  memcpy(&obj->end, end, sizeof(SMPTETimecode));
+  return obj;
+}
+
+void timecode_range_append(SMPTETimecodeRange** first_pptr, SMPTETimecodeRange* new_ptr)
+{
+  if (!*first_pptr)
+  {
+    *first_pptr = new_ptr;
+  }
+  else
+  {
+    SMPTETimecodeRange* node_ptr = *first_pptr;
+    for (;
+         node_ptr->next_ptr;
+         node_ptr = node_ptr->next_ptr);
+
+    node_ptr->next_ptr = new_ptr;
+    new_ptr->next_ptr = NULL;
+  }
+}
+
+/*
+ * Output data for JSON
+ */
+typedef struct
+{
+  Queue*              info_queue;
+  Queue*              error_queue;
+  SMPTETimecodeRange* timecode_range_ptr;
+  size_t              discarded_bits_at_start;
+  SMPTETimecode       start, end;
+} OutputData;
+
+static OutputData* create_output_data(Queue* info_queue, Queue* error_queue)
+{
+  OutputData* obj = malloc(sizeof(OutputData));
+
+  obj->timecode_range_ptr = NULL;
+  obj->info_queue = info_queue;
+  obj->error_queue = error_queue;
+  obj->discarded_bits_at_start = 0;
+
+  return obj;
+}
+
+static void output_data_to_json(OutputData* data)
+{
+
+  /*
+   * Determine success or failure
+   */
+  int result_code;
+  const char* error_msg = NULL;
+
+  if (data->error_queue->n == 0)
+  {
+    result_code = 200;
+    error_msg = "";
+  }
+  else
+  {
+    Msg* last_msg =& data->error_queue->msgs[data->error_queue->n - 1];
+    result_code = last_msg->status_code;
+    error_msg = last_msg->string;
+  }
+
+
+  /*
+   * Output JSON.
+   */
+  printf("{\n"); 
+
+  printf("\t\"InfoMessages\": [\n");
+  
+  if (data->info_queue->n > 0)
+  {
+    Msg* m = &data->info_queue->msgs[0];
+
+    for (size_t i = 0; i < data->info_queue->n - 1; ++i, ++m)
+    {
+      printf("\t\t{\"status_code\": %d, \"string\":\" %s\", \"level\": %d},\n",
+             m->status_code, m->string, m->level); 
+    }
+
+    printf("\t\t{\"status_code\": %d, \"string\":\" %s\", \"level\": %d}\n", 
+           m->status_code, m->string, m->level); 
+  }
+
+  printf("\t], \n");
+
+
+  printf("\t\"ErrorMessages\": [\n");
+  
+  if (data->error_queue->n > 0)
+  {
+    Msg* m = &data->error_queue->msgs[0];
+
+    for (size_t i = 0; i < data->error_queue->n - 1; ++i, ++m)
+    {
+      printf("\t\t{\"status_code\": %d, \"string\":\" %s\", \"level\": %d},\n",
+             m->status_code, m->string, m->level); 
+    }
+
+    printf("\t\t{\"status_code\": %d, \"string\":\" %s\", \"level\": %d}\n", 
+           m->status_code, m->string, m->level); 
+  }
+
+  printf("\t], \n");
+
+
+  if (result_code == 200)
+  {
+    printf("\t\"TimecodeRanges\": [\n");
+
+    if (data->timecode_range_ptr)
+    {
+      SMPTETimecodeRange* node = data->timecode_range_ptr;
+
+      printf("\t\t[\"%s\", \"%s\"]", timecode_to_str(&node->start), 
+          timecode_to_str(&node->start));
+
+
+      for (node = node->next_ptr; node; node = node->next_ptr)
+      {
+        printf(",\n");
+        printf("\t\t[i%s, %s]", timecode_to_str(&node->start), 
+            timecode_to_str(&node->start));
+      }
+      printf("\n");
+
+    }
+
+    printf("\t], \n");
+  }
+
+  printf("\t\"ResultCode\": %d,\n", result_code);
+  printf("\t\"ErrorMsg\": \"%s\",\n",error_msg);
+
+  if (result_code == 200)
+  {
+    printf("\t\"DiscardedBitsAtStart\": %ld,\n", data->discarded_bits_at_start);
+    printf("\t\"Start\": \"%s\",\n", timecode_to_str(&data->start));
+    printf("\t\"End\": \"%s\"\n", timecode_to_str(&data->end));
+  }
+
+  printf("}\n"); 
+}
+
 static void usage (int status) 
 {
   printf ("ltcdump - parse linear time code from a audio-file.\n\n");
   printf ("Usage: ltcdump [ OPTIONS ] <filename>\n\n");
   printf ("Options:\n\
-  -f, --fps <num>         set framerate\n\
-  -v, --verbose           set debug info displau\n\
+  -f, --fps <num>         override 2etected framerate\n\
+  -v, --verbose           set debug info display\n\
+  -j, --json              output results as JSON\n\
   -h, --help              display this help and exit\n\
 \n");
 
@@ -116,6 +394,7 @@ static struct option const long_options[] =
   {"help", no_argument, 0, 'h'},
   {"fps", required_argument, 0, 'f'},
   {"verbose", no_argument, 0, 'v'},
+  {"json", no_argument, 0, 'j'},
   {NULL, 0, NULL, 0}
 };
 
@@ -125,11 +404,16 @@ static struct option const long_options[] =
  * Decode a string containg characters '0' and '1' which represent a
  * sequence of LTC frame. Print the timestamps found in these frames
  */
-static size_t consume_digits(char* digits, size_t n)
+static size_t consume_digits(char* digits, size_t n,
+                             bool* resynced_ptr, 
+                             bool* got_frame_ptr,
+                             SMPTETimecode* timecode_ptr )
 {
   LTCFrame frame;
   size_t frame_count = 0;
   size_t bytes_discarded = 0;
+  if (resynced_ptr) *resynced_ptr = false;
+  if (got_frame_ptr) *got_frame_ptr = false;
 
   /*
    * We're looking for 80 characters that end in SYNC_WORD_STR
@@ -138,13 +422,13 @@ static size_t consume_digits(char* digits, size_t n)
   {
     if (strncmp(&digits[80-16], SYNC_WORD_STR, 16) == 0)
     {
-      if (verbosity > 2)
-        printf("*** Got frame: %.80s\n", digits);
+      log_info(2, "Got frame: %.80s", digits);
       break;
     }
     else
     {
-      printf("*** Looking for sync word %.80s\n", digits);
+      log_info(2, "Looking for sync word %.80s", digits);
+      *resynced_ptr = true;
     }
   }
 
@@ -174,15 +458,21 @@ static size_t consume_digits(char* digits, size_t n)
       return ST_ERROR;
     }
 
-     SMPTETimecode stime;
-     ltc_frame_to_time(&stime, &frame);
+    if (got_frame_ptr)
+    {
+      *got_frame_ptr = true;
+    }
 
-     printf("%02d:%02d:%02d:%02d\n", (int)stime.hours, (int)stime.mins, (int)stime.secs, (int)stime.frame);
+    if (timecode_ptr)
+    {
+      ltc_frame_to_time(timecode_ptr, &frame);
+    }
   }
 
   return frame_count * 80 + bytes_discarded;
 }
 
+/*
 size_t find_first_frame(char* digits, size_t n)
 {
   for (size_t i = 0 ; i < n - 16 ; i++)
@@ -194,17 +484,162 @@ size_t find_first_frame(char* digits, size_t n)
   }
   return ST_ERROR;
 }
+*/
+
+/*
+ * Compute the arithmetic mean of tha data in 'data' for which the 
+ * corresponding element of include is true.
+ */
+static size_t average(size_t* data, size_t n, int8_t* labels, int8_t label)
+{
+  size_t num = 0;
+  size_t sum = 0;
+
+  for (size_t i = 0; i < n; ++i)
+  {
+    if (labels[i] == label)
+    {
+      num++;
+      sum += data[i];
+    }
+  }
+
+  return sum / num;
+}
+
+static size_t max(size_t* data, size_t n)
+{
+  size_t max = 0;
+  for (size_t i = 0; i < n; ++i)
+  {
+    max = data[i] > max ? data[i] : max; 
+  }
+  return max;
+}
+
+static size_t min(size_t* data, size_t n)
+{
+  size_t min = SIZE_MAX;
+  for (size_t i = 0; i < n; ++i)
+  {
+    min = data[i] < min ? data[i] : min; 
+  }
+  return min;
+}
+
+/*
+ * Stats for each sub-distribution in bimodel; see below.
+ */
+typedef struct 
+{
+  int16_t mean;
+  size_t num_samples_outside_threshold;
+  size_t num_samples;
+  bool is_valid;
+} DistStats;
+
+
+static int detect_fps(int16_t* audio_samples, size_t n, 
+                      size_t num_samples_per_sec,
+                      size_t spike_threshold)
+{
+  bool seen_spike = false; // Have we seen a spike yet
+  size_t samples_since_spike = 0;
+  size_t samples_between_spikes[100];
+  size_t spike_count = 0;
+  int8_t* labels = malloc(n * sizeof(int8_t)); 
+
+  for (size_t i = 0; i < n; ++i, ++samples_since_spike)
+  {
+    labels[i] = 0;
+
+    // NB: Sometimes the sampling puts two samples in a peak.
+    if (abs(audio_samples[i]) > spike_threshold && samples_since_spike > 1)
+    {
+      if (seen_spike && spike_count < countof(samples_between_spikes))
+      {
+        samples_between_spikes[spike_count++] = samples_since_spike;
+      }   
+      samples_since_spike = 0;
+      seen_spike = true;
+    }
+  }
+
+  // There should be a tight bimodel distribution about two peaks.
+  // The lower peak corrsponding to 0s and the upper to 1s
+  // The bit rate is given by the lower peak.
+  //
+  // So, we split into two distributions by dividing the data into those
+  // samples that lie above and below the halfway point between the maximum and
+  // minimum values.  set. Then, to check that we have reasonable looking data,
+  // we check that each distribution is tighly clustered about it's average.
+  //
+  size_t mid_point = (max(samples_between_spikes, spike_count) 
+          + min(samples_between_spikes, spike_count)) >> 1;
+
+  // Partition into values above and below mean.
+  for (size_t i = 0; i < spike_count; ++i)
+  {
+    labels[i] = samples_between_spikes[i] < mid_point ? 0 : 1;
+  }
+
+  DistStats low = {0}, high = {0};
+  low.mean = average(samples_between_spikes, spike_count, labels, /* label = */ 0);
+  high.mean = average(samples_between_spikes, spike_count, labels, /* label = */ 1);
+
+  // Check that 90% of the samples are within 15% of mean
+  size_t threshold = high.mean / 7;
+  for (size_t i = 0; i < spike_count; ++i) 
+  {
+    if (labels[i] == 0)
+    {
+      if (abs(samples_between_spikes[i] - low.mean) > threshold)
+      {
+        low.num_samples_outside_threshold++;
+      }
+      ++low.num_samples;
+    }
+    else
+    {
+      if (abs(samples_between_spikes[i] - high.mean) > threshold)
+      {
+        high.num_samples_outside_threshold++;
+      }
+      ++high.num_samples;
+    }
+  }
+
+  free(labels);
+
+  low.is_valid = 1.0 * low.num_samples_outside_threshold / low.num_samples < 0.1;
+  high.is_valid = 1.0 * high.num_samples_outside_threshold / high.num_samples < 0.1;
+
+  if (!low.is_valid || !high.is_valid)
+  {
+    return -1;
+  }
+
+  // bits per second = samples per sec / samples per bit  
+  // FPS = bits per second / 80 bits per frame
+  return num_samples_per_sec / high.mean / 80;
+}
+
+#define return_fail {rv = EXIT_FAILURE; goto exit;}
+#define return_success {rv = EXIT_SUCCESS; goto exit;}
 
 int main(int argc, char **argv)
 {
   char* filename;
-  int fps;
+  OutputData* output_data = create_output_data(&info_queue, &error_queue);
+  int fps = 0;
   int c;
+  int rv = EXIT_SUCCESS;
 
   while ((c = getopt_long (argc, argv,
          "f:" /* fps */
          "h"  /* help */
-         "v", /* verbose */
+         "v"  /* verbose */
+         "j", /* output JSON */
          long_options, (int *) 0)) != EOF)
   {
     switch (c) {
@@ -216,6 +651,10 @@ int main(int argc, char **argv)
 
       case 'v':
         verbosity++;
+        break;
+
+      case 'j':
+        json_output = true;
         break;
 
       case 'h':
@@ -235,14 +674,19 @@ int main(int argc, char **argv)
   /*
    * Do the work 
    */
-  size_t short_long_threshold = 0.72 * 25;
-
   WavFile* fptr = wav_open(filename, "r");
   
   if (!fptr)
   {
-    fprintf(stderr, "Can't open file\n");
-    return EXIT_FAILURE;
+    log_error(500, "Out of memory opening input file");
+    return_fail;
+  }
+
+  if (wav_err()->code != WAV_OK)
+  {
+    char* str = wav_err()->message;
+    log_error(404, "%s", str);
+    return_fail;
   }
 
   // We are assuming 16 bit signed audio.
@@ -252,7 +696,9 @@ int main(int argc, char **argv)
   bool seen_spike = false; // Have we seen a spike yet
   size_t samples_since_spike = 0;
   bool last_digit_was_one = false; // Was the last digit output a 1 ?
-  bool first_block = true;
+  SMPTETimecode starting_timecode;  // 1st code in current range.
+  SMPTETimecode last_timecode;      // Last code we saw
+  bool seen_starting_timecode = false;
 
   while (true)
   {
@@ -283,109 +729,143 @@ int main(int argc, char **argv)
         max = audio_samples[i];
     } 
 
-    if (verbosity > 2)
+    int16_t threshold = max >> 1;
+
+    log_info(2, "Using threshold %d", threshold);
+
+    /*
+     * If it's the first block of data, calibrate the FPS
+     */
+    if (digit_count == 0 && fps == 0)
     {
-      printf("*** Using threshold %d\n", max >> 1);
+      size_t freq = wav_get_sample_rate(fptr);
+      fps = detect_fps(audio_samples, num_audio_samples, freq, threshold);
+      
+      if (fps == -1)
+      {
+        log_error(415, "Failed to detect FPS; input does not contain LTC.");
+        return_fail;
+      }
+
+      log_info(1, "Detected FPS=%d\n", fps);
     }
+
 
     /*
      * Process audio samples to digits.
      */
-    for (size_t i = 0; i < num_audio_samples; ++i)
+    size_t short_long_threshold = 0.72 * fps;
+
+    for (size_t i = 0; i < num_audio_samples; ++i, ++samples_since_spike)
     {
       if ((abs(audio_samples[i]) > (max >> 1)) 
-      // The sampling might give two adjacent samples in the spike
-  		    && samples_since_spike != 0
-  		    )
+          // The sampling might give two adjacent samples in the spike
+          && samples_since_spike > 1
+          )
       {
-
-        if (seen_spike && samples_since_spike < 18)
+        // If this is not the first spike, then it makes sense
+        // to calculate the duration since the last spike.
+        if (seen_spike)
         {
-          // Short -> 1
-  	  if (!last_digit_was_one)
-  	  {
-  	    digits[digit_count++] = '1';
-  	    last_digit_was_one = true;
-  	  }
-  	  else
+          if (samples_since_spike < short_long_threshold)
           {
+            // Short -> 1
+            // (Two spikes equates to a '1', so skip the second)
+            if (!last_digit_was_one)
+            {
+              digits[digit_count++] = '1';
+              last_digit_was_one = true;
+            }
+            else
+            {
               last_digit_was_one = false;
-  	  }
+            }
+          }
+          else
+          {
+            // Long --> 0
+            last_digit_was_one = false;
+            digits[digit_count++] = '0';
+          } 
         }
-        else
-        {
-          // Long --> 0
-  	  last_digit_was_one = false;
-          digits[digit_count++] = '0';
-        } 
   
         seen_spike = true;
         samples_since_spike = 0;
 
-	/*
-	 * If we've over-filled the digits buffer then it's likely that
-	 * consume_digits() has not found any valid LTC frames. 
-	 */
-	if (digit_count == sizeof(digits))
-	{
-          fprintf(stderr, "No LTC frames found in input file.\n");
-	  goto exit;
-	}
-      }
-      else
-      {
-        ++samples_since_spike;
+        /*
+         * If we've over-filled the digits buffer then it's likely that
+         * consume_digits() has not found any valid LTC frames. 
+         */
+        if (digit_count == sizeof(digits))
+        {
+          log_error(415, "No LTC frames found in input file.");
+          return_fail
+        }
       }
     }
-
-    // If this is the first block, we need to throw away
-    // digits until we get to the first frame.
-     /*
-    size_t offset = 0;
-    if (first_block)
-    {
-      first_block = false;
-      printf("%s\n",digits);
-      offset = find_first_frame(digits, digit_count);
-      if (offset == ST_ERROR)
-      {
-        fprintf(stderr, "Failed to find LTC frame.\n");
-        break;
-      }
-    }
-     printf("%d\n", offset);
-      printf("%s\n",&digits[offset]);
-      */
 
     /*
      * Consume digits and output time code
      */
-    size_t num_digits_consumed = consume_digits(digits, digit_count);
+    bool resynced, got_frame;
+    size_t num_digits_consumed = consume_digits(digits, digit_count, 
+                                                &resynced, 
+                                                &got_frame, 
+                                                &last_timecode);
 
     if (num_digits_consumed == ST_ERROR)
     {
-      fprintf(stderr, "Lost synchronisation.\n");
-      goto exit;
+      log_error(408, "Lost synchronisation");
+      return_fail;
     }
 
     // Remove consumed digits from buffer
     memmove(digits, digits + num_digits_consumed, digit_count - num_digits_consumed);
     digit_count -= num_digits_consumed;
+
+    if (got_frame > 0)
+    {
+      log_info(2, "Frame: %s", timecode_to_str(&last_timecode));
+
+      if (resynced && seen_starting_timecode)
+      {
+        log_info(1, "Warning: Gap between LTC frames");
+      
+        printf("%s --> %s\n", timecode_to_str(&starting_timecode),
+                              timecode_to_str(&last_timecode));
+
+        // Add to linked list of ranges for JSON.
+        timecode_range_append(&output_data->timecode_range_ptr, 
+                              create_timecode_range(&starting_timecode, &last_timecode));
+
+        starting_timecode = last_timecode;
+      }
+
+      if (!seen_starting_timecode)
+      {
+        starting_timecode = last_timecode;
+        seen_starting_timecode = true;
+      }
+    }
+  }
+
+  if (seen_starting_timecode)
+  {
+    printf("%s --> %s\n", timecode_to_str(&starting_timecode),
+                          timecode_to_str(&last_timecode));
+
+    // Add to linked list of ranges for JSON.
+    timecode_range_append(&output_data->timecode_range_ptr, 
+                          create_timecode_range(&starting_timecode, &last_timecode));
   }
 
 exit:
   wav_close(fptr);
 
-  printf("\
-{\
-\"Success\" : false,\n\
-\"ErrorMsg\" : \"usb dongle missing\"\n\
-\"DigitsBeforeFirstFrame\" : 40\n\
-\"Start\" : \"17:30:32:13\"\n\
-\"End\" : \"17:35:32:23\"\n\
-}\n\
-");
+  if (json_output)
+  {
+    output_data_to_json(output_data);
+  }
 
-
-  return 0;
+  return rv;
 }
