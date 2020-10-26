@@ -864,6 +864,27 @@ int main(int argc, char **argv)
 exit:
   wav_close(fptr);
 
+  // Extract start and end timecodes.
+  if (!output_data->timecode_range_ptr)
+  {
+    log_error(0, "No timecode found in file.");
+  }
+  else
+  {
+    output_data->start = output_data->timecode_range_ptr->start;
+
+    for (SMPTETimecodeRange* ptr = output_data->timecode_range_ptr; 
+         ptr; 
+         ptr = ptr->next_ptr)
+    {
+      if (!ptr->next_ptr)
+      {
+        output_data->end = output_data->timecode_range_ptr->end;
+      }
+    }
+  }
+
+
   if (json_output)
   {
     output_data_to_json(output_data);
