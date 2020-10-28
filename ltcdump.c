@@ -362,10 +362,11 @@ static void output_data_to_json(OutputData* data)
   }
 
   printf("\t\"ResultCode\": %d,\n", result_code);
-  printf("\t\"ErrorMsg\": \"%s\",\n",error_msg);
+  printf("\t\"ErrorMsg\": \"%s\"",error_msg);
 
   if (result_code == 200)
   {
+    printf(",\n");
     printf("\t\"DiscardedBitsAtStart\": %ld,\n", data->discarded_bits_at_start);
     printf("\t\"Start\": \"%s\",\n", timecode_to_str(&data->start));
     printf("\t\"End\": \"%s\"\n", timecode_to_str(&data->end));
@@ -379,7 +380,7 @@ static void usage (int status)
   printf ("ltcdump - parse linear time code from a audio-file.\n\n");
   printf ("Usage: ltcdump [ OPTIONS ] <filename>\n\n");
   printf ("Options:\n\
-  -f, --fps <num>         override 2etected framerate\n\
+  -f, --fps <num>         override detected framerate\n\
   -v, --verbose           set debug info display\n\
   -j, --json              output results as JSON\n\
   -h, --help              display this help and exit\n\
@@ -405,20 +406,19 @@ static struct option const long_options[] =
  * sequence of LTC frame. Print the timestamps found in these frames
  */
 static size_t consume_digits(char* digits, size_t n,
-                             bool* resynced_ptr, 
+                             size_t* digits_discarded_ptr,
                              bool* got_frame_ptr,
                              SMPTETimecode* timecode_ptr )
 {
   LTCFrame frame;
   size_t frame_count = 0;
-  size_t bytes_discarded = 0;
-  if (resynced_ptr) *resynced_ptr = false;
+  size_t digits_discarded = 0;
   if (got_frame_ptr) *got_frame_ptr = false;
 
   /*
    * We're looking for 80 characters that end in SYNC_WORD_STR
    */
-  for (; n > 80; --n, ++digits, ++bytes_discarded)
+  for (; n > 80; --n, ++digits, ++digits_discarded)
   {
     if (strncmp(&digits[80-16], SYNC_WORD_STR, 16) == 0)
     {
@@ -428,7 +428,7 @@ static size_t consume_digits(char* digits, size_t n,
     else
     {
       log_info(2, "Looking for sync word %.80s", digits);
-      *resynced_ptr = true;
+      //*resynced_ptr = true;
     }
   }
 
@@ -469,7 +469,9 @@ static size_t consume_digits(char* digits, size_t n,
     }
   }
 
-  return frame_count * 80 + bytes_discarded;
+  if (digits_discarded_ptr) *digits_discarded_ptr = digits_discarded;
+
+  return frame_count * 80 + digits_discarded;
 }
 
 /*
@@ -807,9 +809,10 @@ int main(int argc, char **argv)
     /*
      * Consume digits and output time code
      */
-    bool resynced, got_frame;
+    bool got_frame;
+    size_t digits_discarded = 0;
     size_t num_digits_consumed = consume_digits(digits, digit_count, 
-                                                &resynced, 
+                                                &digits_discarded, 
                                                 &got_frame, 
                                                 &last_timecode);
 
@@ -819,6 +822,12 @@ int main(int argc, char **argv)
       return_fail;
     }
 
+    if (!seen_starting_timecode)
+    {
+      output_data->discarded_bits_at_start += digits_discarded;
+    }
+
+
     // Remove consumed digits from buffer
     memmove(digits, digits + num_digits_consumed, digit_count - num_digits_consumed);
     digit_count -= num_digits_consumed;
@@ -827,7 +836,7 @@ int main(int argc, char **argv)
     {
       log_info(2, "Frame: %s", timecode_to_str(&last_timecode));
 
-      if (resynced && seen_starting_timecode)
+      if (digits_discarded > 0 && seen_starting_timecode)
       {
         log_info(1, "Warning: Gap between LTC frames");
       
@@ -867,7 +876,7 @@ exit:
   // Extract start and end timecodes.
   if (!output_data->timecode_range_ptr)
   {
-    log_error(0, "No timecode found in file.");
+    log_error(415, "No timecode found in file.");
   }
   else
   {

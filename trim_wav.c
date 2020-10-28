@@ -8,7 +8,13 @@
 #include <string.h>
 #include <stdlib.h>
 #include <getopt.h>
+#include <unistd.h>
 #include "wav.h"
+
+typedef enum {
+  UNITS_MICROSECONDS,
+  UNITS_SAMPLES
+} Units;
 
 typedef char bool;
 //static const char false = 0;
@@ -16,11 +22,13 @@ static const char true = 1;
 
 int trim_start_of_wav_file(const char* input_filename,
                            const char* output_filename,
-                           size_t num_samples)
+                           size_t n,
+			   Units units)
 {
   // Num of samples to write out in each block.
   static const size_t block_size = 4096;
   uint8_t* buffer = NULL;
+  size_t num_samples;
   WavFile* in_fptr = wav_open(input_filename, "r");
   WavFile* out_fptr = wav_open(output_filename, "w");
 
@@ -32,6 +40,16 @@ int trim_start_of_wav_file(const char* input_filename,
   wav_set_format(out_fptr, wav_get_format(in_fptr));
   wav_set_sample_rate(out_fptr, wav_get_sample_rate(in_fptr));
   wav_set_valid_bits_per_sample(out_fptr, wav_get_valid_bits_per_sample(in_fptr));
+
+  // Convert microseconds to num samples.
+  if (units == UNITS_SAMPLES)
+  {
+    num_samples = n;
+  }
+  else
+  {
+    num_samples = wav_get_sample_rate(in_fptr) * n / 1000000;
+  }
 
   ssize_t num_blocks_to_skip = num_samples / block_size;
   ssize_t num_samples_to_skip = num_samples % block_size;
@@ -80,9 +98,10 @@ int trim_start_of_wav_file(const char* input_filename,
 static void usage (int status)
 {
   printf ("trim_wav - Trim samples from beginning of wav file.\n\n");
-  printf ("Usage: ltcdump -n xxx <input filename> <output filename>\n\n");
+  printf ("Usage: ltcdump [ -n xxx | -m xxx] <input filename> <output filename>\n\n");
   printf ("Options:\n\
   -n, --num_samples <num>   number of samples to trim\n\
+  -m, --microseconds <num>  number of microseconds to trim\n\
   -h, --help                display this help and exit\n\
   \n");
 
@@ -92,7 +111,8 @@ static void usage (int status)
 static struct option const long_options[] =
 {
   {"help", no_argument, 0, 'h'},
-  {"num_samples", required_argument, 0, 'f'},
+  {"num_samples", required_argument, 0, 'n'},
+  {"microseconds", required_argument, 0, 'm'},
   {NULL, 0, NULL, 0}
 };
 
@@ -100,10 +120,12 @@ static struct option const long_options[] =
 int main(int argc, char **argv)
 {
   int num_samples = -1;
+  int microseconds = -1;
   int c;
 
   while ((c = getopt_long (argc, argv,
          "n:"  /* Number of samples to trim */
+         "m:"  /* Number of samples to trim */
          "h" , /* help */
          long_options, (int *) 0)) != EOF)
   {
@@ -111,6 +133,12 @@ int main(int argc, char **argv)
       case 'n':
         {
         num_samples = atoi(optarg);
+        }
+        break;
+
+      case 'm':
+        {
+        microseconds = atoi(optarg);
         }
         break;
 
@@ -135,11 +163,37 @@ int main(int argc, char **argv)
   const char* input_filename = argv[optind];
   const char* output_filename = argv[optind + 1];
 
-  if (num_samples == -1)
+  if (num_samples == -1 && microseconds == -1)
   {
-    fprintf(stderr, "Please use -n to specify number of samples to trim.\n");
+    fprintf(stderr, "Please use -n or -m to specify how much to trim.\n");
     return EXIT_FAILURE;
   }
 
-  return trim_start_of_wav_file(input_filename, output_filename, num_samples) ? EXIT_SUCCESS : EXIT_FAILURE;
+  // Check that output file doesn't exist
+  if (access(output_filename, F_OK) != -1)
+  {
+    char* line = NULL;
+    size_t len = 0;
+    ssize_t num_bytes;
+
+    printf("File '%s' already exists. Overwirte ?  [y/N] ", output_filename);
+
+    num_bytes = getline(&line, &len, stdin);
+    if (num_bytes == -1)
+    {
+      fprintf(stderr, "Failed to read line of input from user.\n");
+      return EXIT_FAILURE;
+    }
+    else if (num_bytes != 2 && (line[0] != 'y' || line[0] != 'Y'))
+    {
+      return EXIT_SUCCESS;
+    }
+    free(line);
+  }
+
+  return trim_start_of_wav_file(input_filename, 
+		                output_filename, 
+				num_samples == -1 ? microseconds : num_samples,
+				num_samples == -1 ? UNITS_MICROSECONDS : UNITS_SAMPLES
+				) ? EXIT_SUCCESS : EXIT_FAILURE;
 }
