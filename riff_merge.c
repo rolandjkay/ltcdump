@@ -192,6 +192,9 @@ int main(int argc, char **argv)
   size_t file_size = 0;
   int m;
   int rv = EXIT_SUCCESS;
+  FILE* meta_in_fptr = NULL;
+  FILE* data_in_fptr = NULL;
+  FILE* out_fptr = NULL;
   uint32_t metadata_chunk_ids[] = {BEXT, IXML, PAD, 0};
   uint32_t data_chunk_ids[] = {FMT, DATA, 0};
 
@@ -222,9 +225,9 @@ int main(int argc, char **argv)
     free(line);
   }
 
-  FILE* meta_in_fptr = fopen(metadata_filename, "r");
-  FILE* data_in_fptr = fopen(data_filename, "r");
-  FILE* out_fptr = fopen(out_filename, "w");
+  meta_in_fptr = fopen(metadata_filename, "r");
+  data_in_fptr = fopen(data_filename, "r");
+  out_fptr = fopen(out_filename, "w");
 
   // Write WAVE header
   data = RIFF;
