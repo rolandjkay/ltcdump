@@ -198,7 +198,7 @@ int main(int argc, char **argv)
   uint32_t metadata_chunk_ids[] = {BEXT, IXML, PAD, 0};
   uint32_t data_chunk_ids[] = {FMT, DATA, 0};
 
-  if (argc != 3) usage(EXIT_FAILURE);
+  if (argc != 4) usage(EXIT_FAILURE);
 
   const char* metadata_filename = argv[1];
   const char* data_filename = argv[2];

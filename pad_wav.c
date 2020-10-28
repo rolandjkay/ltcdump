@@ -1,7 +1,7 @@
 /*
- * To get perfect synchronisation, we need to strip the first partial
- * frame from the audio recorder's audio track. This utility helps
- * with this. 
+ * To get perfect synchronisation, we need to pad with enough silence
+ * to cover the first partial frame from the audio recorder's audio track. This
+ * utility helps with this. 
  */
 #include <stdio.h>
 #include <stdint.h>
@@ -20,11 +20,12 @@ typedef char bool;
 //static const char false = 0;
 static const char true = 1;
 
-int trim_start_of_wav_file(const char* input_filename,
-                           const char* output_filename,
-                           size_t n,
-			   Units units)
+int pad_start_of_wav_file(const char* input_filename,
+                          const char* output_filename,
+                          size_t n,
+                          Units units)
 {
+  int rv = -1;
   // Num of samples to write out in each block.
   static const size_t block_size = 4096;
   uint8_t* buffer = NULL;
@@ -51,8 +52,22 @@ int trim_start_of_wav_file(const char* input_filename,
     num_samples = wav_get_sample_rate(in_fptr) * n / 1000000;
   }
 
+  buffer = malloc(sample_size * num_samples * n_channels);
+  memset(buffer, 0, sample_size * num_samples * n_channels);
+  size_t samples_written = wav_write(out_fptr, buffer, num_samples);
+
+  if (samples_written != num_samples && wav_err()->code != WAV_OK)
+  {
+    fprintf(stderr, "Error writing wav file: %s", wav_err()->message);
+    goto exit;    
+  }
+ 
+  free(buffer);
+
+  /*
   ssize_t num_blocks_to_skip = num_samples / block_size;
   ssize_t num_samples_to_skip = num_samples % block_size;
+  */
 
   buffer = malloc(sample_size * n_channels * block_size);
 
@@ -65,43 +80,54 @@ int trim_start_of_wav_file(const char* input_filename,
       if (wav_err()->code != WAV_OK)
       {
         fprintf(stderr, "Error reading wav file: %s", wav_err()->message);
-        return -1;
-      }
-      else
-      {
-        break;
+        goto exit;
       }
     }
 
-    if (num_blocks_to_skip-- > 0) continue;
+    /* if (num_blocks_to_skip-- > 0) continue;
 
     size_t shortened_block_size = block_size - num_samples_to_skip;
     size_t samples_written = wav_write(out_fptr, 
                                        buffer + num_samples_to_skip, 
-                                       block_size - num_samples_to_skip);
+                                       samples_read - num_samples_to_skip);
     num_samples_to_skip = 0;
 
-    if (samples_written != block_size - shortened_block_size && wav_err()->code != WAV_OK)
+    if (samples_written != samples_read - shortened_block_size  && wav_err()->code != WAV_OK)
     {
       fprintf(stderr, "Error writing wav file: %s", wav_err()->message);
-      return -1;
+      goto exit;
     }
+    */
+
+    samples_written = wav_write(out_fptr, buffer, samples_read);
+
+    if (samples_written != samples_read && wav_err()->code != WAV_OK)
+    {
+      fprintf(stderr, "Error writing wav file: %s", wav_err()->message);
+      goto exit;
+    }
+
+    if (samples_read != block_size) break;
   }
 
+  rv = 0;
+
+exit:
+  free(buffer);
   wav_close(in_fptr);
   wav_close(out_fptr);
 
-  return 0;
+  return rv;
 }
 
 
 static void usage (int status)
 {
-  printf ("trim_wav - Trim samples from beginning of wav file.\n\n");
-  printf ("Usage: ltcdump [ -n xxx | -m xxx] <input filename> <output filename>\n\n");
+  printf ("pad_wav - Pad beginning of wav file with silence.\n\n");
+  printf ("Usage: pad_wav [ -n xxx | -m xxx] <input filename> <output filename>\n\n");
   printf ("Options:\n\
-  -n, --num_samples <num>   number of samples to trim\n\
-  -m, --microseconds <num>  number of microseconds to trim\n\
+  -n, --num_samples <num>   number of samples to pad\n\
+  -m, --microseconds <num>  number of microseconds to pad\n\
   -h, --help                display this help and exit\n\
   \n");
 
@@ -124,8 +150,8 @@ int main(int argc, char **argv)
   int c;
 
   while ((c = getopt_long (argc, argv,
-         "n:"  /* Number of samples to trim */
-         "m:"  /* Number of samples to trim */
+         "n:"  /* Number of samples to pad */
+         "m:"  /* Number of samples to pad */
          "h" , /* help */
          long_options, (int *) 0)) != EOF)
   {
@@ -165,7 +191,7 @@ int main(int argc, char **argv)
 
   if (num_samples == -1 && microseconds == -1)
   {
-    fprintf(stderr, "Please use -n or -m to specify how much to trim.\n");
+    fprintf(stderr, "Please use -n or -m to specify how much to pad.\n");
     return EXIT_FAILURE;
   }
 
@@ -191,9 +217,9 @@ int main(int argc, char **argv)
     free(line);
   }
 
-  return trim_start_of_wav_file(input_filename, 
-		                output_filename, 
-				num_samples == -1 ? microseconds : num_samples,
-				num_samples == -1 ? UNITS_MICROSECONDS : UNITS_SAMPLES
-				) ? EXIT_SUCCESS : EXIT_FAILURE;
+  return pad_start_of_wav_file(input_filename, 
+	                output_filename, 
+			num_samples == -1 ? microseconds : num_samples,
+			num_samples == -1 ? UNITS_MICROSECONDS : UNITS_SAMPLES
+			)  == 0 ? EXIT_SUCCESS : EXIT_FAILURE;
 }

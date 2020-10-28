@@ -1,2 +1,4 @@
 ltcdump
-.ltcdump.c.swp
+pad_wav
+riff_merge
+.*c.swp
