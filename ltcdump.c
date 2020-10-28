@@ -351,7 +351,7 @@ static void output_data_to_json(OutputData* data)
       for (node = node->next_ptr; node; node = node->next_ptr)
       {
         printf(",\n");
-        printf("\t\t[i%s, %s]", timecode_to_str(&node->start), 
+        printf("\t\t[%s, %s]", timecode_to_str(&node->start), 
             timecode_to_str(&node->start));
       }
       printf("\n");
