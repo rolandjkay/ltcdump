@@ -506,7 +506,7 @@ static size_t average(size_t* data, size_t n, int8_t* labels, int8_t label)
     }
   }
 
-  return sum / num;
+  return num == 0 ? ST_ERROR : sum / num;
 }
 
 static size_t max(size_t* data, size_t n)
@@ -567,6 +567,9 @@ static int detect_fps(int16_t* audio_samples, size_t n,
     }
   }
 
+  // If no spikes, then this is not a valid LTC wav file.
+  if (!seen_spike || spike_count == 0) return -1;
+
   // There should be a tight bimodel distribution about two peaks.
   // The lower peak corrsponding to 0s and the upper to 1s
   // The bit rate is given by the lower peak.
@@ -588,6 +591,8 @@ static int detect_fps(int16_t* audio_samples, size_t n,
   DistStats low = {0}, high = {0};
   low.mean = average(samples_between_spikes, spike_count, labels, /* label = */ 0);
   high.mean = average(samples_between_spikes, spike_count, labels, /* label = */ 1);
+
+  if (low.mean == ST_ERROR || high.mean == ST_ERROR) return -1;
 
   // Check that 90% of the samples are within 15% of mean
   size_t threshold = high.mean / 7;
@@ -673,6 +678,7 @@ int main(int argc, char **argv)
 
   filename = argv[optind];
 
+
   /*
    * Do the work 
    */
@@ -690,6 +696,7 @@ int main(int argc, char **argv)
     log_error(404, "%s", str);
     return_fail;
   }
+
 
   // We are assuming 16 bit signed audio.
   int16_t audio_samples[512];
