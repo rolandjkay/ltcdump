@@ -345,14 +345,14 @@ static void output_data_to_json(OutputData* data)
       SMPTETimecodeRange* node = data->timecode_range_ptr;
 
       printf("\t\t[\"%s\", \"%s\"]", timecode_to_str(&node->start), 
-          timecode_to_str(&node->start));
+          timecode_to_str(&node->end));
 
 
       for (node = node->next_ptr; node; node = node->next_ptr)
       {
         printf(",\n");
-        printf("\t\t[%s, %s]", timecode_to_str(&node->start), 
-            timecode_to_str(&node->start));
+        printf("\t\t[\"%s\", \"%s\"]", timecode_to_str(&node->start), 
+            timecode_to_str(&node->end));
       }
       printf("\n");
 
